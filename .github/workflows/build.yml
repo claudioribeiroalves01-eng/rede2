@@ -1,0 +1,206 @@
+name: Gerar APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Criar projeto
+        run: |
+          mkdir -p proj/app/src/main/java/com/exemplo/scannerrede
+          cd proj
+          cat > settings.gradle.kts <<'FIM_ARQUIVO'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ScannerRede"
+          include(":app")
+          FIM_ARQUIVO
+          cat > build.gradle.kts <<'FIM_ARQUIVO'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          FIM_ARQUIVO
+          cat > app/build.gradle.kts <<'FIM_ARQUIVO'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.exemplo.scannerrede"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.exemplo.scannerrede"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+          }
+          FIM_ARQUIVO
+          cat > app/src/main/AndroidManifest.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <application
+                  android:label="Scanner de Rede"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          FIM_ARQUIVO
+          cat > app/src/main/java/com/exemplo/scannerrede/MainActivity.kt <<'FIM_ARQUIVO'
+          package com.exemplo.scannerrede
+          
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.ConnectivityManager
+          import android.net.Uri
+          import android.net.TrafficStats
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.*
+          import kotlinx.coroutines.*
+          import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withPermit
+          import java.io.File
+          import java.net.*
+          
+          data class Dispositivo(
+              val ip: String, val nome: String, val latenciaMs: Long,
+              val mac: String, val eRoteador: Boolean, val eEsteTablet: Boolean
+          )
+          
+          class MainActivity : Activity() {
+              private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+              private lateinit var txtRede: TextView
+              private lateinit var txtVelocidade: TextView
+              private lateinit var btnScan: Button
+              private lateinit var btnRoteador: Button
+              private lateinit var lista: ListView
+              private val itens = mutableListOf<String>()
+              private lateinit var adapter: ArrayAdapter<String>
+              private var gateway: String? = null
+          
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val raiz = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 48, 32, 32) }
+                  txtRede = TextView(this).apply { textSize = 16f; text = "Rede: -" }
+                  txtVelocidade = TextView(this).apply { textSize = 16f; text = "Tráfego deste tablet: -" }
+                  btnScan = Button(this).apply { text = "Escanear rede"; setOnClickListener { escanear() } }
+                  btnRoteador = Button(this).apply {
+                      text = "Abrir roteador (ver DHCP: estático/dinâmico)"
+                      setOnClickListener { gateway?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$it"))) } }
+                  }
+                  adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, itens)
+                  lista = ListView(this).apply { adapter = this@MainActivity.adapter }
+                  listOf(txtRede, txtVelocidade, btnScan, btnRoteador, lista).forEach { raiz.addView(it) }
+                  setContentView(raiz)
+                  monitorarTrafego()
+                  escanear()
+              }
+          
+              override fun onDestroy() { scope.cancel(); super.onDestroy() }
+          
+              // Velocidade de uso do próprio tablet (bytes/s, atualizado a cada segundo)
+              private fun monitorarTrafego() = scope.launch {
+                  var rx = TrafficStats.getTotalRxBytes(); var tx = TrafficStats.getTotalTxBytes()
+                  while (isActive) {
+                      delay(1000)
+                      val nRx = TrafficStats.getTotalRxBytes(); val nTx = TrafficStats.getTotalTxBytes()
+                      txtVelocidade.text = "Tráfego deste tablet: ↓ ${fmt(nRx - rx)}  ↑ ${fmt(nTx - tx)}"
+                      rx = nRx; tx = nTx
+                  }
+              }
+          
+              private fun fmt(bytesPorSeg: Long): String {
+                  val mbps = bytesPorSeg * 8 / 1_000_000.0
+                  return "%.2f Mbps".format(mbps)
+              }
+          
+              private fun escanear() {
+                  val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+                  val lp = cm.getLinkProperties(cm.activeNetwork)
+                  val meuIp = lp?.linkAddresses?.map { it.address }?.firstOrNull { it is Inet4Address }?.hostAddress
+                  if (meuIp == null) { txtRede.text = "Conecte-se a uma rede Wi-Fi."; return }
+                  gateway = lp.routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }?.gateway?.hostAddress
+                  val base = meuIp.substringBeforeLast(".")
+                  txtRede.text = "Rede: $base.0/24  |  Tablet: $meuIp  |  Roteador: ${gateway ?: "?"}"
+                  btnScan.isEnabled = false; itens.clear(); adapter.notifyDataSetChanged()
+                  itens.add("Escaneando..."); adapter.notifyDataSetChanged()
+          
+                  scope.launch {
+                      val sem = Semaphore(40)
+                      val achados = (1..254).map { n ->
+                          async(Dispatchers.IO) { sem.withPermit { sondar("$base.$n", meuIp) } }
+                      }.awaitAll().filterNotNull()
+                      val macs = lerArp()
+                      val finais = achados.map { it.copy(mac = macs[it.ip] ?: it.mac) }
+                          .sortedBy { it.ip.substringAfterLast(".").toInt() }
+                      itens.clear()
+                      finais.forEach { d ->
+                          val tag = when { d.eEsteTablet -> " (este tablet)"; d.eRoteador -> " (roteador)"; else -> "" }
+                          itens.add("${d.ip}$tag\n${d.nome}  •  ${d.latenciaMs} ms  •  MAC: ${d.mac}\nTipo de IP: indeterminado (confira o DHCP no roteador)")
+                      }
+                      if (finais.isEmpty()) itens.add("Nenhum dispositivo encontrado.")
+                      adapter.notifyDataSetChanged()
+                      btnScan.isEnabled = true
+                      Toast.makeText(this@MainActivity, "${finais.size} dispositivo(s)", Toast.LENGTH_SHORT).show()
+                  }
+              }
+          
+              private fun sondar(ip: String, meuIp: String): Dispositivo? {
+                  val inicio = System.nanoTime()
+                  var vivo = false
+                  try { vivo = InetAddress.getByName(ip).isReachable(400) } catch (_: Exception) {}
+                  if (!vivo) {
+                      // Muitos PCs Windows bloqueiam ping; testa portas comuns.
+                      for (porta in intArrayOf(445, 135, 139, 22, 80, 443, 3389, 5900)) {
+                          try { Socket().use { it.connect(InetSocketAddress(ip, porta), 250) }; vivo = true }
+                          catch (_: ConnectException) { vivo = true }   // recusou = máquina existe
+                          catch (_: Exception) {}
+                          if (vivo) break
+                      }
+                  }
+                  if (!vivo) return null
+                  val ms = (System.nanoTime() - inicio) / 1_000_000
+                  val nome = try { InetAddress.getByName(ip).canonicalHostName.takeIf { it != ip } ?: "(sem nome)" } catch (_: Exception) { "(sem nome)" }
+                  return Dispositivo(ip, nome, ms, "indisponível", ip == gateway, ip == meuIp)
+              }
+          
+              // No Android 10+ este arquivo costuma ser bloqueado; então o MAC pode não aparecer.
+              private fun lerArp(): Map<String, String> = try {
+                  File("/proc/net/arp").readLines().drop(1).mapNotNull {
+                      val c = it.trim().split(Regex("\\s+"))
+                      if (c.size >= 4 && c[3] != "00:00:00:00:00:00") c[0] to c[3] else null
+                  }.toMap()
+              } catch (_: Exception) { emptyMap() }
+          }
+          FIM_ARQUIVO
+      - name: Compilar
+        run: cd proj && gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScannerRede-APK
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
