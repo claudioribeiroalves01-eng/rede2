@@ -15,7 +15,7 @@ jobs:
           gradle-version: 8.9
       - name: Criar projeto
         run: |
-          mkdir -p proj/app/src/main/java/com/exemplo/scannerrede
+          mkdir -p proj/app/src/main/java/com/exemplo/scannerrede proj/app/src/main/res/drawable proj/app/src/main/res/mipmap-anydpi-v26
           cd proj
           cat > settings.gradle.kts <<'FIM_ARQUIVO'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -59,6 +59,8 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
               <application
                   android:label="Scanner de Rede"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
                   android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
@@ -75,11 +77,15 @@ jobs:
           
           import android.app.Activity
           import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.net.ConnectivityManager
-          import android.net.Uri
           import android.net.TrafficStats
+          import android.net.Uri
           import android.os.Bundle
-          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
           import android.widget.*
           import kotlinx.coroutines.*
           import kotlinx.coroutines.sync.Semaphore
@@ -93,29 +99,73 @@ jobs:
           )
           
           class MainActivity : Activity() {
+              private val PORTA_TESTE = 5300
               private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
               private lateinit var txtRede: TextView
               private lateinit var txtVelocidade: TextView
               private lateinit var btnScan: Button
-              private lateinit var btnRoteador: Button
               private lateinit var lista: ListView
-              private val itens = mutableListOf<String>()
-              private lateinit var adapter: ArrayAdapter<String>
+              private val itens = mutableListOf<Dispositivo>()
+              private val resultados = mutableMapOf<String, String>()
+              private var testando: String? = null
+              private lateinit var adapter: CartaoAdapter
               private var gateway: String? = null
+          
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun fundo(cor: Int, raio: Int) = GradientDrawable().apply {
+                  setColor(cor); cornerRadius = raio * resources.displayMetrics.density
+              }
+              private fun texto(t: String, tam: Float, cor: Int, negrito: Boolean = false) = TextView(this).apply {
+                  text = t; textSize = tam; setTextColor(cor); if (negrito) setTypeface(typeface, Typeface.BOLD)
+              }
+              private fun botao(t: String, corFundo: String, corTexto: String) = Button(this).apply {
+                  text = t; isAllCaps = false; textSize = 15f
+                  setTextColor(Color.parseColor(corTexto)); background = fundo(Color.parseColor(corFundo), 14)
+              }
           
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val raiz = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 48, 32, 32) }
-                  txtRede = TextView(this).apply { textSize = 16f; text = "Rede: -" }
-                  txtVelocidade = TextView(this).apply { textSize = 16f; text = "Tráfego deste tablet: -" }
-                  btnScan = Button(this).apply { text = "Escanear rede"; setOnClickListener { escanear() } }
-                  btnRoteador = Button(this).apply {
-                      text = "Abrir roteador (ver DHCP: estático/dinâmico)"
-                      setOnClickListener { gateway?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$it"))) } }
+                  window.statusBarColor = Color.parseColor("#1E3A8A")
+                  val raiz = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#F1F5F9"))
                   }
-                  adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, itens)
-                  lista = ListView(this).apply { adapter = this@MainActivity.adapter }
-                  listOf(txtRede, txtVelocidade, btnScan, btnRoteador, lista).forEach { raiz.addView(it) }
+                  val topo = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#1E3A8A"))
+                      setPadding(dp(20), dp(24), dp(20), dp(20))
+                  }
+                  topo.addView(texto("Scanner de Rede", 24f, Color.WHITE, true))
+                  txtRede = texto("Rede: -", 14f, Color.parseColor("#BFDBFE"))
+                  topo.addView(txtRede)
+                  txtVelocidade = texto("Tablet: -", 15f, Color.WHITE, true).apply {
+                      setPadding(dp(14), dp(8), dp(14), dp(8)); background = fundo(Color.parseColor("#2F4FA8"), 20)
+                      layoutParams = LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) }
+                  }
+                  topo.addView(txtVelocidade)
+                  raiz.addView(topo)
+          
+                  val linhaBotoes = LinearLayout(this).apply { setPadding(dp(12), dp(12), dp(12), dp(4)) }
+                  btnScan = botao("Escanear rede", "#2563EB", "#FFFFFF").apply { setOnClickListener { escanear() } }
+                  val btnRoteador = botao("Roteador", "#E2E8F0", "#1E3A8A").apply {
+                      setOnClickListener {
+                          val g = gateway
+                          if (g == null) Toast.makeText(this@MainActivity, "Roteador não encontrado", Toast.LENGTH_SHORT).show()
+                          else startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$g")))
+                      }
+                  }
+                  linhaBotoes.addView(btnScan, LinearLayout.LayoutParams(0, -2, 2f).apply { rightMargin = dp(8) })
+                  linhaBotoes.addView(btnRoteador, LinearLayout.LayoutParams(0, -2, 1f))
+                  raiz.addView(linhaBotoes)
+          
+                  adapter = CartaoAdapter()
+                  lista = ListView(this).apply {
+                      divider = null; dividerHeight = 0; clipToPadding = false
+                      setPadding(dp(12), 0, dp(12), dp(12)); this.adapter = this@MainActivity.adapter
+                      setOnItemClickListener { _, _, pos, _ ->
+                          val d = itens[pos]
+                          if (!d.eEsteTablet && testando == null) testar(d.ip)
+                      }
+                  }
+                  raiz.addView(lista, LinearLayout.LayoutParams(-1, 0, 1f))
                   setContentView(raiz)
                   monitorarTrafego()
                   escanear()
@@ -123,21 +173,63 @@ jobs:
           
               override fun onDestroy() { scope.cancel(); super.onDestroy() }
           
-              // Velocidade de uso do próprio tablet (bytes/s, atualizado a cada segundo)
+              inner class CartaoAdapter : BaseAdapter() {
+                  override fun getCount() = itens.size
+                  override fun getItem(p: Int) = itens[p]
+                  override fun getItemId(p: Int) = p.toLong()
+                  override fun getView(p: Int, v: View?, parent: ViewGroup?): View {
+                      val d = itens[p]
+                      val cor = when { d.eEsteTablet -> "#7C3AED"; d.eRoteador -> "#2563EB"; else -> "#16A34A" }
+                      val corLat = when { d.latenciaMs < 20 -> "#16A34A"; d.latenciaMs < 80 -> "#D97706"; else -> "#DC2626" }
+                      val externo = FrameLayout(this@MainActivity).apply { setPadding(0, dp(6), 0, dp(6)) }
+                      val cartao = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.VERTICAL; background = fundo(Color.WHITE, 16)
+                          setPadding(dp(16), dp(14), dp(16), dp(14)); elevation = dp(2).toFloat()
+                      }
+                      val l1 = LinearLayout(this@MainActivity).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+                      l1.addView(View(this@MainActivity).apply {
+                          background = fundo(Color.parseColor(cor), 6)
+                          layoutParams = LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(10) }
+                      })
+                      l1.addView(texto(d.ip, 19f, Color.parseColor("#0F172A"), true))
+                      val tag = when { d.eEsteTablet -> "ESTE TABLET"; d.eRoteador -> "ROTEADOR"; else -> "" }
+                      if (tag.isNotEmpty()) l1.addView(texto(tag, 11f, Color.WHITE, true).apply {
+                          background = fundo(Color.parseColor(cor), 10); setPadding(dp(8), dp(2), dp(8), dp(2))
+                          layoutParams = LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) }
+                      })
+                      cartao.addView(l1)
+                      cartao.addView(texto(d.nome, 14f, Color.parseColor("#475569")))
+                      val l3 = LinearLayout(this@MainActivity)
+                      l3.addView(texto("${d.latenciaMs} ms", 13f, Color.parseColor(corLat), true))
+                      l3.addView(texto("   •   MAC: ${d.mac}", 13f, Color.parseColor("#64748B")))
+                      cartao.addView(l3)
+                      if (!d.eEsteTablet) {
+                          val msg = when {
+                              testando == d.ip -> "Testando velocidade..."
+                              resultados[d.ip] != null -> resultados[d.ip]!!
+                              else -> "Toque para testar a velocidade"
+                          }
+                          val corMsg = if (resultados[d.ip] != null) "#1E3A8A" else "#94A3B8"
+                          cartao.addView(texto(msg, 14f, Color.parseColor(corMsg), resultados[d.ip] != null).apply {
+                              setPadding(0, dp(8), 0, 0)
+                          })
+                      }
+                      externo.addView(cartao)
+                      return externo
+                  }
+              }
+          
               private fun monitorarTrafego() = scope.launch {
                   var rx = TrafficStats.getTotalRxBytes(); var tx = TrafficStats.getTotalTxBytes()
                   while (isActive) {
                       delay(1000)
                       val nRx = TrafficStats.getTotalRxBytes(); val nTx = TrafficStats.getTotalTxBytes()
-                      txtVelocidade.text = "Tráfego deste tablet: ↓ ${fmt(nRx - rx)}  ↑ ${fmt(nTx - tx)}"
+                      txtVelocidade.text = "Tablet  ↓ ${fmt(nRx - rx)}   ↑ ${fmt(nTx - tx)}"
                       rx = nRx; tx = nTx
                   }
               }
           
-              private fun fmt(bytesPorSeg: Long): String {
-                  val mbps = bytesPorSeg * 8 / 1_000_000.0
-                  return "%.2f Mbps".format(mbps)
-              }
+              private fun fmt(bytesPorSeg: Long) = "%.2f Mbps".format(bytesPorSeg * 8 / 1_000_000.0)
           
               private fun escanear() {
                   val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -146,9 +238,9 @@ jobs:
                   if (meuIp == null) { txtRede.text = "Conecte-se a uma rede Wi-Fi."; return }
                   gateway = lp.routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }?.gateway?.hostAddress
                   val base = meuIp.substringBeforeLast(".")
-                  txtRede.text = "Rede: $base.0/24  |  Tablet: $meuIp  |  Roteador: ${gateway ?: "?"}"
-                  btnScan.isEnabled = false; itens.clear(); adapter.notifyDataSetChanged()
-                  itens.add("Escaneando..."); adapter.notifyDataSetChanged()
+                  txtRede.text = "Rede $base.0/24   •   Tablet $meuIp"
+                  btnScan.isEnabled = false; btnScan.text = "Escaneando..."
+                  itens.clear(); adapter.notifyDataSetChanged()
           
                   scope.launch {
                       val sem = Semaphore(40)
@@ -156,17 +248,47 @@ jobs:
                           async(Dispatchers.IO) { sem.withPermit { sondar("$base.$n", meuIp) } }
                       }.awaitAll().filterNotNull()
                       val macs = lerArp()
-                      val finais = achados.map { it.copy(mac = macs[it.ip] ?: it.mac) }
-                          .sortedBy { it.ip.substringAfterLast(".").toInt() }
-                      itens.clear()
-                      finais.forEach { d ->
-                          val tag = when { d.eEsteTablet -> " (este tablet)"; d.eRoteador -> " (roteador)"; else -> "" }
-                          itens.add("${d.ip}$tag\n${d.nome}  •  ${d.latenciaMs} ms  •  MAC: ${d.mac}\nTipo de IP: indeterminado (confira o DHCP no roteador)")
-                      }
-                      if (finais.isEmpty()) itens.add("Nenhum dispositivo encontrado.")
+                      itens.addAll(achados.map { it.copy(mac = macs[it.ip] ?: it.mac) }
+                          .sortedBy { it.ip.substringAfterLast(".").toInt() })
                       adapter.notifyDataSetChanged()
-                      btnScan.isEnabled = true
-                      Toast.makeText(this@MainActivity, "${finais.size} dispositivo(s)", Toast.LENGTH_SHORT).show()
+                      btnScan.isEnabled = true; btnScan.text = "Escanear rede"
+                      txtRede.text = "Rede $base.0/24   •   ${itens.size} em uso"
+                  }
+              }
+          
+              private fun testar(ip: String) {
+                  testando = ip; adapter.notifyDataSetChanged()
+                  scope.launch {
+                      val r = withContext(Dispatchers.IO) {
+                          try {
+                              val dn = medir(ip, 'D'); val up = medir(ip, 'U')
+                              "↓ %.0f Mbps    ↑ %.0f Mbps".format(dn, up)
+                          } catch (e: Exception) {
+                              "Sem resposta: rode servidor_velocidade.py neste PC"
+                          }
+                      }
+                      resultados[ip] = r; testando = null; adapter.notifyDataSetChanged()
+                  }
+              }
+          
+              // 'D' = PC envia dados ao tablet (download); 'U' = tablet envia ao PC (upload)
+              private fun medir(ip: String, modo: Char): Double {
+                  Socket().use { s ->
+                      s.connect(InetSocketAddress(ip, PORTA_TESTE), 1500); s.soTimeout = 10000
+                      val out = s.getOutputStream(); val inp = s.getInputStream()
+                      out.write(modo.code); out.flush()
+                      val buf = ByteArray(65536); var total = 0L
+                      val ini = System.nanoTime()
+                      if (modo == 'D') {
+                          while (true) { val n = inp.read(buf); if (n < 0) break; total += n }
+                      } else {
+                          val fim = ini + 3_000_000_000L
+                          while (System.nanoTime() < fim) { out.write(buf); total += buf.size }
+                          out.flush(); s.shutdownOutput()
+                          while (inp.read(buf) >= 0) { }
+                      }
+                      val seg = (System.nanoTime() - ini) / 1e9
+                      return total * 8 / seg / 1e6
                   }
               }
           
@@ -175,10 +297,9 @@ jobs:
                   var vivo = false
                   try { vivo = InetAddress.getByName(ip).isReachable(400) } catch (_: Exception) {}
                   if (!vivo) {
-                      // Muitos PCs Windows bloqueiam ping; testa portas comuns.
                       for (porta in intArrayOf(445, 135, 139, 22, 80, 443, 3389, 5900)) {
                           try { Socket().use { it.connect(InetSocketAddress(ip, porta), 250) }; vivo = true }
-                          catch (_: ConnectException) { vivo = true }   // recusou = máquina existe
+                          catch (_: ConnectException) { vivo = true }
                           catch (_: Exception) {}
                           if (vivo) break
                       }
@@ -189,7 +310,6 @@ jobs:
                   return Dispositivo(ip, nome, ms, "indisponível", ip == gateway, ip == meuIp)
               }
           
-              // No Android 10+ este arquivo costuma ser bloqueado; então o MAC pode não aparecer.
               private fun lerArp(): Map<String, String> = try {
                   File("/proc/net/arp").readLines().drop(1).mapNotNull {
                       val c = it.trim().split(Regex("\\s+"))
@@ -197,6 +317,37 @@ jobs:
                   }.toMap()
               } catch (_: Exception) { emptyMap() }
           }
+          FIM_ARQUIVO
+          cat > app/src/main/res/drawable/ic_bg.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#1E3A8A" />
+          </shape>
+          FIM_ARQUIVO
+          cat > app/src/main/res/drawable/ic_fg.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="40" android:viewportHeight="40">
+              <group android:translateX="8" android:translateY="9">
+                  <path android:fillColor="#FFFFFF"
+                      android:pathData="M1,9l2,2c4.97,-4.97 13.03,-4.97 18,0l2,-2C16.93,2.93 7.08,2.93 1,9zM9,17l3,3 3,-3c-1.65,-1.66 -4.34,-1.66 -6,0zM5,13l2,2c2.76,-2.76 7.24,-2.76 10,0l2,-2C15.14,9.14 8.87,9.14 5,13z" />
+              </group>
+          </vector>
+          FIM_ARQUIVO
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          FIM_ARQUIVO
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'FIM_ARQUIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
           FIM_ARQUIVO
       - name: Compilar
         run: cd proj && gradle assembleDebug --no-daemon
